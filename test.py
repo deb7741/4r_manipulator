@@ -1,7 +1,7 @@
 """Shared AIX support functions."""
 
 import sys
-import sysconfig
+import tkinter 
 
 try:
     import subprocess
