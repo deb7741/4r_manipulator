@@ -6,52 +6,83 @@ An educational 4R spherical manipulator for learning **forward and inverse kinem
 
 ## Features
 
-- **Forward kinematics** — turn the four joint dials and watch the tip's X, Y, Z and pitch update live.
-- **Inverse kinematics** — type a target X/Y/Z and tool pitch, press **Go**, and the arm solves for the joint angles (both elbow configurations and reach-over-the-top are tried).
-- **Live side and top views** of the arm.
-- **Taught points A–E** for repeatable demos.
-- **Simulation mode** — runs on any PC without a Pi; servo commands are printed instead of sent.
+- **Jog** each joint with its dial or by typing an exact angle.
+- **Inverse kinematics** — type a target X/Y/Z and tool pitch, press **Go**. All solutions are tried (elbow up/down, reaching over the top) and the one needing the least movement within the joint limits is used.
+- **Smooth motion** — every move is speed-limited and synchronised so all joints start and finish together, with eased acceleration. No more slamming to a preset.
+- **Teach & replay** — save the current pose as a named point, drag to reorder, and **Play sequence** (optionally looping). Points are stored in `points.json`.
+- **STOP (Esc)**, **Home (H)** and **Release servos** buttons.
+- **Live side and top views** of the arm, with the IK target marked.
+- **Simulation mode** — runs on any PC without a Pi.
 
 ## Hardware
 
-| Joint | Servo GPIO (BCM) | Physical pin |
+| Joint | GPIO (BCM) | Physical pin |
 |---|---|---|
 | Base (yaw) | 17 | 11 |
 | Shoulder | 18 | 12 |
 | Elbow | 22 | 15 |
 | Wrist | 27 | 13 |
 
-Power the servos from a separate 5–6 V supply sized for all four motors, and connect its ground to the Pi's ground. Don't power servos from the Pi's 5 V pin.
+Power the servos from a separate 5–6 V supply that can deliver the stall current of all four motors (≈1 A each for MG996R-class servos), and **connect its ground to the Pi's ground**. Never power servos from the Pi's 5 V pin.
 
-## Run
+## Install
+
+On the Raspberry Pi:
 
 ```bash
-pip install -r requirements.txt
-python3 4R_Manipulator_GUI.py              # on a Pi: drives the servos
-python3 4R_Manipulator_GUI.py --simulate   # anywhere: no GPIO
+sudo apt install python3-pyqt5 pigpio python3-pigpio
+sudo systemctl enable --now pigpiod      # jitter-free servo pulses
+git clone https://github.com/deb7741/4r_manipulator && cd 4r_manipulator
+python3 4R_Manipulator_GUI.py
 ```
 
-## Calibrating to your arm
+On a PC (simulation):
 
-Joint angles are computed from servo angles using the offsets and directions at the top of `kinematics.py`:
-
-```python
-SERVO_OFFSETS    = (0.0, 0.0, 90.0, 90.0)  # servo angle at which each joint is "zero"
-SERVO_DIRECTIONS = (1, 1, 1, 1)            # flip to -1 if a servo is mounted reversed
+```bash
+pip install PyQt5 pytest
+python3 4R_Manipulator_GUI.py --simulate
 ```
 
-Defaults: base 0° points along +X, shoulder 0° is horizontal, elbow and wrist are straight at 90°. Set the shoulder to 90° and elbow/wrist to 90° — the arm should point straight up. If it doesn't, adjust the offsets until it does.
+The driver is picked automatically: **pigpio** (best) → **RPi.GPIO** (works, but servos twitch, so they are released after each move) → **simulation**. Force one with `--backend pigpio|rpi|sim`. Add `-v` to log every pulse.
 
-Set the four link lengths (in cm) in the GUI to match your build.
+> At start-up the arm moves straight to the home pose (the servos' real position is unknown at power-up), so keep the work area clear.
+
+## Calibration — `config.json`
+
+All settings live in `config.json` (edit by hand; the GUI's **Save settings** writes link lengths and speed):
+
+| Key | Meaning |
+|---|---|
+| `pins_bcm` | GPIO pin per joint |
+| `pulse_us` | pulse width (µs) at 0° and 180° for each servo. Defaults `[400, 2400]` match the original code's 2–12 % duty cycle. Many SG90/MG90S servos want about `[500, 2400]` |
+| `offsets_deg` | servo angle at which each joint is "zero" (base along +X, shoulder horizontal, elbow and wrist straight) |
+| `directions` | `1`, or `-1` if a servo is mounted reversed |
+| `min_deg` / `max_deg` | soft limits — keep the arm off the table and its own frame. IK and jogging never exceed them |
+| `links_cm` | link lengths L1 (base column) … L4 (tool) |
+| `home_deg` | Home pose |
+| `max_speed_deg_s` | fastest joint speed |
+| `release_after_move` | `auto` (release only on RPi.GPIO), `always` or `never` |
+| `backend` | `auto`, `pigpio`, `rpi` or `sim` |
+
+**Quick calibration**
+
+1. Type `90` into Shoulder, Elbow and Wrist. The arm should point straight up. If a joint is off, adjust its entry in `offsets_deg` until it is.
+2. Increase the Shoulder angle a little: the arm should tilt *forward* (towards +X when the base is at 0°). If it tilts back, set that joint's `directions` entry to `-1` and its offset to `180 - offset`.
+3. Jog each joint slowly to where it would hit something and set `min_deg` / `max_deg` a few degrees inside that.
+4. Measure your links pivot-to-pivot and enter them under **Settings**, then **Save settings**.
+5. Check: put the tip on a ruler mark, press **Use current** and compare X/Y/Z.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `4R_Manipulator_GUI.py` | PyQt5 interface |
-| `kinematics.py` | Forward / inverse kinematics (pure Python, no hardware) |
-| `servo.py` | Raspberry Pi PWM servo driver with simulation fallback |
-| `test_kinematics.py` | Unit tests — run `python -m pytest -q` |
+| `kinematics.py` | Forward / inverse kinematics (pure Python) |
+| `motion.py` | Smooth, synchronised move planner |
+| `servo.py` | pigpio / RPi.GPIO / simulation servo drivers |
+| `config.py`, `config.json` | Settings and calibration |
+| `points.json` | Taught points |
+| `test_*.py` | Tests — run `python3 -m pytest -q` (25 tests, no hardware needed) |
 
 ## The maths
 

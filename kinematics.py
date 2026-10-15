@@ -19,30 +19,20 @@ Joint angles q1..q4 (degrees):
   q3  elbow pitch, relative to link 2 (0 = straight)
   q4  wrist pitch, relative to link 3 (0 = straight)
 
-Servo angles (0–180°) are converted to joint angles with a per-joint offset
-and direction, so the maths stays the same whatever way the servos are
-mounted. Adjust ``SERVO_OFFSETS`` / ``SERVO_DIRECTIONS`` to match your arm.
+Servo angles are converted to joint angles with a per-joint offset and
+direction (``Calibration``), so the maths is the same however the servos are
+mounted. Calibration normally comes from ``config.json``.
 
-This module is pure Python (no GPIO / Qt), so it can be unit-tested and
-reused anywhere.
+Pure Python: no GPIO, no Qt — safe to unit-test anywhere.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Sequence, Tuple
 
-# Servo angle that corresponds to joint angle 0 for each joint.
-# Defaults: base 0° = +X axis, shoulder 0° = horizontal,
-# elbow 90° = straight, wrist 90° = straight.
-SERVO_OFFSETS: Tuple[float, float, float, float] = (0.0, 0.0, 90.0, 90.0)
-
-# +1 if increasing the servo angle increases the joint angle, -1 otherwise.
-SERVO_DIRECTIONS: Tuple[int, int, int, int] = (1, 1, 1, 1)
-
-SERVO_MIN = 0.0
-SERVO_MAX = 180.0
+Angles = Tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)
@@ -65,54 +55,74 @@ class Pose:
     pitch: float
 
 
-def servo_to_joint(servo_deg: Sequence[float]) -> Tuple[float, float, float, float]:
+@dataclass(frozen=True)
+class Calibration:
+    # Servo angle at which each joint angle is zero. Defaults: base 0° = +X,
+    # shoulder 0° = horizontal, elbow and wrist straight at 90°.
+    offsets: Angles = (0.0, 0.0, 90.0, 90.0)
+    # +1 if increasing the servo angle increases the joint angle, else -1.
+    directions: Tuple[int, int, int, int] = (1, 1, 1, 1)
+    # Soft limits in servo degrees — keep the arm off the table / its own frame.
+    min_angles: Angles = (0.0, 0.0, 0.0, 0.0)
+    max_angles: Angles = (180.0, 180.0, 180.0, 180.0)
+
+    def clamp(self, servo: Sequence[float]) -> Angles:
+        return tuple(  # type: ignore[return-value]
+            min(hi, max(lo, s)) for s, lo, hi in zip(servo, self.min_angles, self.max_angles)
+        )
+
+    def within_limits(self, servo: Sequence[float], tol: float = 1e-6) -> bool:
+        return all(lo - tol <= s <= hi + tol for s, lo, hi in zip(servo, self.min_angles, self.max_angles))
+
+
+DEFAULT_CAL = Calibration()
+
+
+def servo_to_joint(servo_deg: Sequence[float], cal: Calibration = DEFAULT_CAL) -> Angles:
     return tuple(  # type: ignore[return-value]
-        d * (s - o) for s, o, d in zip(servo_deg, SERVO_OFFSETS, SERVO_DIRECTIONS)
+        d * (s - o) for s, o, d in zip(servo_deg, cal.offsets, cal.directions)
     )
 
 
-def joint_to_servo(joint_deg: Sequence[float]) -> Tuple[float, float, float, float]:
+def joint_to_servo(joint_deg: Sequence[float], cal: Calibration = DEFAULT_CAL) -> Angles:
     return tuple(  # type: ignore[return-value]
-        o + q / d for q, o, d in zip(joint_deg, SERVO_OFFSETS, SERVO_DIRECTIONS)
+        o + q / d for q, o, d in zip(joint_deg, cal.offsets, cal.directions)
     )
 
 
-def joint_positions(joint_deg: Sequence[float], links: Links):
-    """Return the 3-D positions of base, shoulder, elbow, wrist and tip.
-
-    Useful for drawing the arm. Angles in degrees.
-    """
+def joint_positions(joint_deg: Sequence[float], links: Links) -> List[Tuple[float, float, float]]:
+    """3-D positions of base, shoulder, elbow, wrist and tip (for drawing)."""
     q1, q2, q3, q4 = (math.radians(a) for a in joint_deg)
-    a2 = q2
-    a3 = q2 + q3
-    a4 = q2 + q3 + q4
-
-    # Radial distance and height of each joint in the arm's vertical plane.
     planar = [(0.0, 0.0), (0.0, links.base)]
     r, z = 0.0, links.base
-    for length, angle in ((links.upper, a2), (links.fore, a3), (links.tool, a4)):
+    for length, angle in ((links.upper, q2), (links.fore, q2 + q3), (links.tool, q2 + q3 + q4)):
         r += length * math.cos(angle)
         z += length * math.sin(angle)
         planar.append((r, z))
-
     c, s = math.cos(q1), math.sin(q1)
     return [(pr * c, pr * s, pz) for pr, pz in planar]
 
 
-def forward(servo_deg: Sequence[float], links: Links) -> Pose:
+def forward(servo_deg: Sequence[float], links: Links, cal: Calibration = DEFAULT_CAL) -> Pose:
     """End-effector pose for the given servo angles (degrees)."""
-    q = servo_to_joint(servo_deg)
+    q = servo_to_joint(servo_deg, cal)
     x, y, z = joint_positions(q, links)[-1]
     return Pose(x, y, z, q[1] + q[2] + q[3])
 
 
 def inverse(
-    target: Pose, links: Links, elbow_up: Optional[bool] = None
-) -> Optional[Tuple[float, float, float, float]]:
-    """Servo angles that place the tip at ``target`` with the given pitch.
+    target: Pose,
+    links: Links,
+    cal: Calibration = DEFAULT_CAL,
+    elbow_up: Optional[bool] = None,
+    prefer: Optional[Sequence[float]] = None,
+) -> Optional[Angles]:
+    """Servo angles that put the tip at ``target`` with the requested pitch.
 
-    Returns ``None`` if the point is out of reach or needs a servo outside
-    0–180°. With ``elbow_up=None`` both elbow configurations are tried.
+    Tries facing the target and reaching back over the top, with both elbow
+    configurations. Returns ``None`` if out of reach or outside the soft
+    limits. If ``prefer`` (current servo angles) is given, the valid solution
+    needing the least total joint movement is returned.
     """
     l2, l3 = links.upper, links.fore
     if l2 <= 0 or l3 <= 0:
@@ -122,8 +132,7 @@ def inverse(
     dist = math.hypot(target.x, target.y)
     phi = math.radians(target.pitch)
 
-    # Either face the target (radial distance +dist) or face away from it and
-    # reach back over the top (base turned 180°, radial distance -dist).
+    solutions: List[Angles] = []
     for q1, r in ((yaw, dist), (yaw + 180.0, -dist), (yaw - 180.0, -dist)):
         # Wrist centre in the arm's vertical plane.
         rw = r - links.tool * math.cos(phi)
@@ -137,17 +146,22 @@ def inverse(
             q3 = -math.acos(d) if up else math.acos(d)
             q2 = math.atan2(zw, rw) - math.atan2(l3 * math.sin(q3), l2 + l3 * math.cos(q3))
             q4 = phi - q2 - q3
-            servo = joint_to_servo((q1, math.degrees(q2), math.degrees(q3), math.degrees(q4)))
-            servo = tuple(_wrap_servo(s) for s in servo)
-            if all(SERVO_MIN - 1e-6 <= s <= SERVO_MAX + 1e-6 for s in servo):
-                return tuple(min(SERVO_MAX, max(SERVO_MIN, s)) for s in servo)  # type: ignore[return-value]
-    return None
+            servo = joint_to_servo((q1, math.degrees(q2), math.degrees(q3), math.degrees(q4)), cal)
+            servo = tuple(_wrap(s) for s in servo)
+            if cal.within_limits(servo):
+                solutions.append(cal.clamp(servo))
+
+    if not solutions:
+        return None
+    if prefer is None:
+        return solutions[0]
+    return min(solutions, key=lambda s: sum(abs(a - b) for a, b in zip(s, prefer)))
 
 
-def _wrap_servo(angle: float) -> float:
-    """Bring an angle into (-180, 180] + offsets without changing its meaning."""
+def _wrap(angle: float) -> float:
+    """Shift by whole turns into (-90, 270] without changing the direction."""
     while angle > 270:
         angle -= 360
-    while angle < -90:
+    while angle <= -90:
         angle += 360
     return angle

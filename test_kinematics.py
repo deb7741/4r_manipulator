@@ -54,16 +54,27 @@ def test_unreachable_returns_none():
     assert k.inverse(k.Pose(100, 0, 0, 0), LINKS) is None
 
 
-def test_presets_are_valid_servo_angles():
-    import importlib.util
+def test_inverse_respects_soft_limits():
+    pose = k.forward((10, 55, 150, 140), LINKS)
+    tight = k.Calibration(max_angles=(180, 180, 120, 180))
+    sol = k.inverse(pose, LINKS, tight)
+    assert sol is None or sol[2] <= 120
 
-    if importlib.util.find_spec("PyQt5") is None:
-        return  # GUI not installed; presets live in the GUI module
-    spec = importlib.util.spec_from_file_location("gui", "4R_Manipulator_GUI.py")
-    gui = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gui)
-    for angles in gui.PRESETS.values():
-        assert len(angles) == 4 and all(0 <= a <= 180 for a in angles)
+
+def test_inverse_prefers_least_motion():
+    pose = k.forward((60, 70, 50, 100), LINKS)
+    current = (60, 70, 50, 100)
+    sol = k.inverse(pose, LINKS, prefer=current)
+    assert sol is not None
+    assert sum(abs(a - b) for a, b in zip(sol, current)) < 1e-6
+
+
+def test_reversed_servo_direction_round_trip():
+    cal = k.Calibration(directions=(1, -1, 1, -1), offsets=(0, 180, 90, 90))
+    pose = k.forward((30, 120, 80, 100), LINKS, cal)
+    sol = k.inverse(pose, LINKS, cal)
+    back = k.forward(sol, LINKS, cal)
+    assert close(back.x, pose.x) and close(back.z, pose.z)
 
 
 if __name__ == "__main__":
