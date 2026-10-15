@@ -1,443 +1,283 @@
-from PyQt5 import QtCore, QtGui, QtWidgets
-import RPi.GPIO as GPIO
-import time
+"""
+4R Manipulator control GUI (PyQt5).
+
+  * Forward kinematics: turn the joint dials, see the tip position live.
+  * Inverse kinematics: type a target X/Y/Z + tool pitch, press "Go".
+  * Presets: the original taught points A–E.
+  * Live side and top view of the arm.
+
+Runs on a Raspberry Pi (drives the servos) or on any PC in simulation mode.
+
+    python3 4R_Manipulator_GUI.py            # auto: real servos on a Pi
+    python3 4R_Manipulator_GUI.py --simulate # never touch GPIO
+"""
+
+from __future__ import annotations
+
 import math
-#import numpy as np
+import sys
 
-def setup_gpio():
-	GPIO.setmode(GPIO.BCM)
-	GPIO.setup(Ui_MainWindow.BASE_SERVO_PIN, GPIO.OUT)
-	GPIO.setup(Ui_MainWindow.SECOND_SERVO_PIN, GPIO.OUT)
-	GPIO.setup(Ui_MainWindow.THIRD_SERVO_PIN, GPIO.OUT)
-	GPIO.setup(Ui_MainWindow.FOURTH_SERVO_PIN, GPIO.OUT)
+from PyQt5 import QtCore, QtGui, QtWidgets
 
-def set_servo(servo_pin, angle):
-	duty = angle/18 + 2
-	GPIO.output(servo_pin, True)
-	pwm = GPIO.PWM(servo_pin, 50)
-	pwm.start(0)
-	pwm.ChangeDutyCycle(duty)
-	time.sleep(1)
-	GPIO.output(servo_pin, False)
-	pwm.ChangeDutyCycle(0)
-	pwm.stop()
+import kinematics as kin
+from servo import ON_PI, ServoBank
+
+# BCM pin for each joint: base, shoulder, elbow, wrist
+SERVO_PINS = (17, 18, 22, 27)
+JOINT_NAMES = ("Base", "Shoulder", "Elbow", "Wrist")
+
+# Taught positions (servo angles in degrees) from the original project.
+PRESETS = {
+    "A": (116, 56, 66, 90),
+    "B": (69, 56, 66, 90),
+    "C": (11, 56, 66, 90),
+    "D": (40, 56, 66, 90),
+    "E": (56, 180, 77, 90),
+}
+
+DEFAULT_LINKS_CM = (8.0, 10.0, 8.0, 4.0)
+SEND_DELAY_MS = 60      # wait for the dial to settle before moving the servo
+RELEASE_DELAY_MS = 700  # stop pulses after this long (reduces jitter/heat)
 
 
-class Ui_MainWindow(object):
+class ArmView(QtWidgets.QWidget):
+    """Side view (radial distance vs height) and top view (X vs Y)."""
 
-    #Setting up the GPIO pins
-    GPIO.setmode(GPIO.BCM)
-    BASE_SERVO_PIN = 17
-    SECOND_SERVO_PIN = 18
-    THIRD_SERVO_PIN = 22
-    FOURTH_SERVO_PIN = 27
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(360, 560)
+        self.points = []
+        self.links = kin.Links(*DEFAULT_LINKS_CM)
+        self.joints = (0.0, 0.0, 0.0, 0.0)
 
-    angle_dict = {
-        'A': [116, 56, 66, 90],
-        'B': [69, 56, 66, 90],
-        'C': [11, 56, 66, 90],
-        'D': [40, 56, 66, 90],
-        'E': [56, 180, 77, 90]
-    }
-    
-    def update_coordinates_label(self, x, y, z):
-        self.X_Coordinate.display(x)
-        self.Y_Coordinate.display(y)
-        self.Z_Coordinate.display(z)
-    
-    def forward_kinematics_spherical_arm(self, theta_1, theta_2, theta_3, theta_4, link_length_1, link_length_2, link_length_3, link_length_4):
-         x = (link_length_2 + (link_length_3 + link_length_4*math.cos(theta_4))*math.cos(theta_3))*math.cos(theta_2) + link_length_1*math.cos(theta_1)
-         y = (link_length_2 + (link_length_3 + link_length_4*math.sin(theta_4))*math.sin(theta_3))*math.sin(theta_2) + link_length_1*math.sin(theta_1)
-         return x, y, theta_1
-         
+    def update_arm(self, joints, links):
+        self.joints, self.links = joints, links
+        self.points = kin.joint_positions(joints, links)
+        self.update()
 
-    def update_end_effector_coordinates(self):
-        if not self.lengths_submitted:
-             return
-        
-        theta_1 = self.BaseDial.value()
-        theta_2 = self.SecondDial.value()
-        theta_3 = self.ThirdDial.value()
-        theta_4 = self.FinalDial.value()
-        link_length_1 = self.BaseComponentLength.value()
-        link_length_2 = self.SecondComponentLength.value()
-        link_length_3 = self.ThirdComponentLength.value()
-        link_length_4 = self.FinalComponentLength.value()
-        
-        end_effector_coords = self.forward_kinematics_spherical_arm(theta_1, theta_2, theta_3, theta_4, link_length_1, link_length_2, link_length_3, link_length_4)
-        
-        x, y, phi = end_effector_coords
-        self.update_coordinates_label(x, y, phi)
-    
-    def on_submit_button_clicked(self):
-         self.lengths_submitted = True
-         self.update_end_effector_coordinates()
-    
-    def setupUi(self, MainWindow):
-        MainWindow.setObjectName("MainWindow")
-        MainWindow.resize(1077, 881)
-        self.centralwidget = QtWidgets.QWidget(MainWindow)
-        self.centralwidget.setObjectName("centralwidget")
-        
-        self.AnimationFrame = QtWidgets.QFrame(self.centralwidget)
-        self.AnimationFrame.setGeometry(QtCore.QRect(0, 0, 381, 861))
-        self.AnimationFrame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.AnimationFrame.setFrameShadow(QtWidgets.QFrame.Raised)
-        self.AnimationFrame.setObjectName("AnimationFrame")
-        
-        self.ForwardKinematicsFrame = QtWidgets.QFrame(self.centralwidget)
-        self.ForwardKinematicsFrame.setGeometry(QtCore.QRect(380, 0, 691, 471))
-        self.ForwardKinematicsFrame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.ForwardKinematicsFrame.setFrameShadow(QtWidgets.QFrame.Raised)
-        self.ForwardKinematicsFrame.setObjectName("ForwardKinematicsFrame")
-        
-        self.ComponentLengthFrame = QtWidgets.QFrame(self.ForwardKinematicsFrame)
-        self.ComponentLengthFrame.setGeometry(QtCore.QRect(0, 40, 691, 131))
-        self.ComponentLengthFrame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.ComponentLengthFrame.setFrameShadow(QtWidgets.QFrame.Raised)
-        self.ComponentLengthFrame.setObjectName("ComponentLengthFrame")
-        
-        self.LabelForLengthFrame = QtWidgets.QLabel(self.ComponentLengthFrame)
-        self.LabelForLengthFrame.setGeometry(QtCore.QRect(10, 0, 261, 21))
-        self.LabelForLengthFrame.setObjectName("LabelForLengthFrame")
-        
-        self.LabelForBaseLengthBox = QtWidgets.QLabel(self.ComponentLengthFrame)
-        self.LabelForBaseLengthBox.setGeometry(QtCore.QRect(10, 30, 231, 16))
-        font = QtGui.QFont()
-        font.setPointSize(7)
-        font.setBold(True)
-        font.setWeight(75)
-        self.LabelForBaseLengthBox.setFont(font)
-        self.LabelForBaseLengthBox.setObjectName("LabelForBaseLengthBox")
-        
-        self.BaseComponentLength = QtWidgets.QDoubleSpinBox(self.ComponentLengthFrame)
-        self.BaseComponentLength.setGeometry(QtCore.QRect(260, 30, 71, 22))
-        self.BaseComponentLength.setObjectName("BaseComponentLength")
-        
-        self.LabelForSecondLengthBox = QtWidgets.QLabel(self.ComponentLengthFrame)
-        self.LabelForSecondLengthBox.setGeometry(QtCore.QRect(360, 30, 241, 16))
-        font = QtGui.QFont()
-        font.setPointSize(7)
-        font.setBold(True)
-        font.setWeight(75)
-        self.LabelForSecondLengthBox.setFont(font)
-        self.LabelForSecondLengthBox.setObjectName("LabelForSecondLengthBox")
-        
-        self.SecondComponentLength = QtWidgets.QDoubleSpinBox(self.ComponentLengthFrame)
-        self.SecondComponentLength.setGeometry(QtCore.QRect(610, 30, 71, 22))
-        self.SecondComponentLength.setObjectName("SecondComponentLength")
-        
-        self.LabelForThirdLengthBox = QtWidgets.QLabel(self.ComponentLengthFrame)
-        self.LabelForThirdLengthBox.setGeometry(QtCore.QRect(10, 60, 241, 16))
-        font = QtGui.QFont()
-        font.setPointSize(7)
-        font.setBold(True)
-        font.setWeight(75)
-        self.LabelForThirdLengthBox.setFont(font)
-        self.LabelForThirdLengthBox.setObjectName("LabelForThirdLengthBox")
-        
-        self.ThirdComponentLength = QtWidgets.QDoubleSpinBox(self.ComponentLengthFrame)
-        self.ThirdComponentLength.setGeometry(QtCore.QRect(260, 60, 71, 22))
-        self.ThirdComponentLength.setObjectName("ThirdComponentLength")
-        
-        self.LabelForFinalLengthBox = QtWidgets.QLabel(self.ComponentLengthFrame)
-        self.LabelForFinalLengthBox.setGeometry(QtCore.QRect(360, 60, 241, 16))
-        font = QtGui.QFont()
-        font.setPointSize(7)
-        font.setBold(True)
-        font.setWeight(75)
-        self.LabelForFinalLengthBox.setFont(font)
-        self.LabelForFinalLengthBox.setObjectName("LabelForFinalLengthBox")
-        
-        self.FinalComponentLength = QtWidgets.QDoubleSpinBox(self.ComponentLengthFrame)
-        self.FinalComponentLength.setGeometry(QtCore.QRect(610, 60, 71, 22))
-        self.FinalComponentLength.setObjectName("FinalComponentLength")
-        
-        self.SubmitButton = QtWidgets.QPushButton(self.ComponentLengthFrame)
-        self.SubmitButton.setGeometry(QtCore.QRect(300, 100, 75, 23))
-        self.SubmitButton.setObjectName("SubmitButton")
-        
-        self.DialFrame = QtWidgets.QFrame(self.ForwardKinematicsFrame)
-        self.DialFrame.setGeometry(QtCore.QRect(-1, 169, 691, 201))
-        self.DialFrame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.DialFrame.setFrameShadow(QtWidgets.QFrame.Raised)
-        self.DialFrame.setObjectName("DialFrame")
-        
-        self.AnglesFrameLabel = QtWidgets.QLabel(self.DialFrame)
-        self.AnglesFrameLabel.setGeometry(QtCore.QRect(10, 10, 281, 16))
-        self.AnglesFrameLabel.setObjectName("AnglesFrameLabel")
-        
-        self.BaseDial = QtWidgets.QDial(self.DialFrame)
-        self.BaseDial.setGeometry(QtCore.QRect(30, 40, 131, 131))
-        self.BaseDial.setObjectName("BaseDial")
-        
-        self.SecondDial = QtWidgets.QDial(self.DialFrame)
-        self.SecondDial.setGeometry(QtCore.QRect(180, 40, 131, 131))
-        self.SecondDial.setObjectName("SecondDial")
-        
-        self.ThirdDial = QtWidgets.QDial(self.DialFrame)
-        self.ThirdDial.setGeometry(QtCore.QRect(330, 40, 131, 131))
-        self.ThirdDial.setObjectName("ThirdDial")
-        
-        self.FinalDial = QtWidgets.QDial(self.DialFrame)
-        self.FinalDial.setGeometry(QtCore.QRect(480, 40, 131, 131))
-        self.FinalDial.setObjectName("FinalDial")
-        
-        self.LabelForBaseAngle = QtWidgets.QLCDNumber(self.DialFrame)
-        self.LabelForBaseAngle.setGeometry(QtCore.QRect(60, 170, 64, 23))
-        self.LabelForBaseAngle.setObjectName("LabelForBaseAngle")
-        
-        self.LabelForSecondAngle = QtWidgets.QLCDNumber(self.DialFrame)
-        self.LabelForSecondAngle.setGeometry(QtCore.QRect(210, 170, 64, 23))
-        self.LabelForSecondAngle.setObjectName("LabelForSecondAngle")
-        
-        self.LabelForThirdAngle = QtWidgets.QLCDNumber(self.DialFrame)
-        self.LabelForThirdAngle.setGeometry(QtCore.QRect(360, 170, 64, 23))
-        self.LabelForThirdAngle.setObjectName("LabelForThirdAngle")
-        
-        self.LabelForFinalAngle = QtWidgets.QLCDNumber(self.DialFrame)
-        self.LabelForFinalAngle.setGeometry(QtCore.QRect(510, 170, 64, 23))
-        self.LabelForFinalAngle.setObjectName("LabelForFinalAngle")
-        
-        self.LabelForPointReachedFrame = QtWidgets.QLabel(self.ForwardKinematicsFrame)
-        self.LabelForPointReachedFrame.setGeometry(QtCore.QRect(10, 380, 121, 16))
-        self.LabelForPointReachedFrame.setObjectName("LabelForPointReachedFrame")
-        
-        self.LabelForXCoordinate = QtWidgets.QLabel(self.ForwardKinematicsFrame)
-        self.LabelForXCoordinate.setGeometry(QtCore.QRect(20, 420, 91, 21))
-        font = QtGui.QFont()
-        font.setPointSize(7)
-        font.setBold(True)
-        font.setWeight(75)
-        self.LabelForXCoordinate.setFont(font)
-        self.LabelForXCoordinate.setObjectName("LabelForXCoordinate")
-        
-        self.X_Coordinate = QtWidgets.QLCDNumber(self.ForwardKinematicsFrame)
-        self.X_Coordinate.setGeometry(QtCore.QRect(110, 420, 64, 21))
-        self.X_Coordinate.setObjectName("X_Coordinate")
-        
-        self.LabelForYCoordinate = QtWidgets.QLabel(self.ForwardKinematicsFrame)
-        self.LabelForYCoordinate.setGeometry(QtCore.QRect(250, 420, 91, 21))
-        font = QtGui.QFont()
-        font.setPointSize(7)
-        font.setBold(True)
-        font.setWeight(75)
-        self.LabelForYCoordinate.setFont(font)
-        self.LabelForYCoordinate.setObjectName("LabelForYCoordinate")
-        
-        self.Y_Coordinate = QtWidgets.QLCDNumber(self.ForwardKinematicsFrame)
-        self.Y_Coordinate.setGeometry(QtCore.QRect(340, 420, 64, 21))
-        self.Y_Coordinate.setObjectName("Y_Coordinate")
-        
-        self.LabelForForwardKinematicsFrame = QtWidgets.QLabel(self.ForwardKinematicsFrame)
-        self.LabelForForwardKinematicsFrame.setGeometry(QtCore.QRect(0, 0, 691, 41))
-        self.LabelForForwardKinematicsFrame.setAlignment(QtCore.Qt.AlignCenter)
-        self.LabelForForwardKinematicsFrame.setObjectName("LabelForForwardKinematicsFrame")
-        
-        self.LabelForZCoordinate = QtWidgets.QLabel(self.ForwardKinematicsFrame)
-        self.LabelForZCoordinate.setGeometry(QtCore.QRect(460, 420, 91, 21))
-        font = QtGui.QFont()
-        font.setPointSize(7)
-        font.setBold(True)
-        font.setWeight(75)
-        self.LabelForZCoordinate.setFont(font)
-        self.LabelForZCoordinate.setObjectName("LabelForZCoordinate")
-        
-        self.Z_Coordinate = QtWidgets.QLCDNumber(self.ForwardKinematicsFrame)
-        self.Z_Coordinate.setGeometry(QtCore.QRect(550, 420, 64, 21))
-        self.Z_Coordinate.setObjectName("Z_Coordinate")
-        
-        self.InverseKinematicsFrame = QtWidgets.QFrame(self.centralwidget)
-        self.InverseKinematicsFrame.setGeometry(QtCore.QRect(379, 469, 691, 391))
-        self.InverseKinematicsFrame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.InverseKinematicsFrame.setFrameShadow(QtWidgets.QFrame.Raised)
-        self.InverseKinematicsFrame.setObjectName("InverseKinematicsFrame")
-        
-        self.LabelForInverseKinematicsFrame = QtWidgets.QLabel(self.InverseKinematicsFrame)
-        self.LabelForInverseKinematicsFrame.setGeometry(QtCore.QRect(0, 0, 691, 41))
-        self.LabelForInverseKinematicsFrame.setAlignment(QtCore.Qt.AlignCenter)
-        self.LabelForInverseKinematicsFrame.setObjectName("LabelForInverseKinematicsFrame")
-        
-        self.LabelForInverseKinematicsBox = QtWidgets.QLabel(self.InverseKinematicsFrame)
-        self.LabelForInverseKinematicsBox.setGeometry(QtCore.QRect(6, 50, 221, 20))
-        self.LabelForInverseKinematicsBox.setObjectName("LabelForInverseKinematicsBox")
-        
-        self.RadioButtonForA = QtWidgets.QRadioButton(self.InverseKinematicsFrame)
-        self.RadioButtonForA.setGeometry(QtCore.QRect(50, 110, 71, 41))
-        self.RadioButtonForA.setObjectName("RadioButtonForA")
-        
-        self.RadioButtonForB = QtWidgets.QRadioButton(self.InverseKinematicsFrame)
-        self.RadioButtonForB.setGeometry(QtCore.QRect(160, 110, 71, 41))
-        self.RadioButtonForB.setObjectName("RadioButtonForB")
-        
-        self.RadioButtonForC = QtWidgets.QRadioButton(self.InverseKinematicsFrame)
-        self.RadioButtonForC.setGeometry(QtCore.QRect(270, 110, 71, 41))
-        self.RadioButtonForC.setObjectName("RadioButtonForC")
-        
-        self.RadioButtonForD = QtWidgets.QRadioButton(self.InverseKinematicsFrame)
-        self.RadioButtonForD.setGeometry(QtCore.QRect(380, 110, 71, 41))
-        self.RadioButtonForD.setObjectName("RadioButtonForD")
-        
-        self.RadioButtonForE = QtWidgets.QRadioButton(self.InverseKinematicsFrame)
-        self.RadioButtonForE.setGeometry(QtCore.QRect(490, 110, 71, 41))
-        self.RadioButtonForE.setObjectName("RadioButtonForE")
-        
-        MainWindow.setCentralWidget(self.centralwidget)
-        
-        self.BaseDial.setRange(0, 180)
-        self.SecondDial.setRange(0, 180)
-        self.ThirdDial.setRange(0, 180)
-        self.FinalDial.setRange(0, 180)
-        
-        self.BaseDial.setSingleStep(1)
-        self.SecondDial.setSingleStep(1)
-        self.ThirdDial.setSingleStep(1)
-        self.FinalDial.setSingleStep(1)
-        
-        self.BaseDial.setWrapping(True)
-        self.SecondDial.setWrapping(True)
-        self.ThirdDial.setWrapping(True)
-        self.FinalDial.setWrapping(True)
+    def paintEvent(self, _event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        p.fillRect(self.rect(), QtGui.QColor("#14161c"))
+        if not self.points:
+            return
+        half = self.height() // 2
+        reach = max(1e-6, self.links.base + self.links.upper + self.links.fore + self.links.tool)
 
-        self.BaseDial.valueChanged.connect(self.updateBaseAngle)
-        self.SecondDial.valueChanged.connect(self.updateSecondAngle)
-        self.ThirdDial.valueChanged.connect(self.updateThirdAngle)
-        self.FinalDial.valueChanged.connect(self.updateFinalAngle)
-        
-        self.BaseDial.valueChanged.connect(self.update_end_effector_coordinates)
-        self.SecondDial.valueChanged.connect(self.update_end_effector_coordinates)
-        self.ThirdDial.valueChanged.connect(self.update_end_effector_coordinates)
-        self.FinalDial.valueChanged.connect(self.update_end_effector_coordinates)
-        
-        self.BaseDial.valueChanged.connect(self.updateBaseAngleLabel)
-        self.SecondDial.valueChanged.connect(self.updateSecondAngleLabel)
-        self.ThirdDial.valueChanged.connect(self.updateThirdAngleLabel)
-        self.FinalDial.valueChanged.connect(self.updateFinalAngleLabel)
-        
-        # Connect radio buttons to the function
-        self.RadioButtonForA.clicked.connect(lambda: self.moveServosForRadioButton('A'))
-        self.RadioButtonForB.clicked.connect(lambda: self.moveServosForRadioButton('B'))
-        self.RadioButtonForC.clicked.connect(lambda: self.moveServosForRadioButton('C'))
-        self.RadioButtonForD.clicked.connect(lambda: self.moveServosForRadioButton('D'))
-        self.RadioButtonForE.clicked.connect(lambda: self.moveServosForRadioButton('E'))
-        
-        self.retranslateUi(MainWindow)
-        
-        QtCore.QMetaObject.connectSlotsByName(MainWindow)
-        
-        self.SubmitButton.clicked.connect(self.on_submit_button_clicked)
-        
-        self.lengths_submitted = False
+        yaw = math.radians(self.joints[0])
+        planar = [(x * math.cos(yaw) + y * math.sin(yaw), z) for x, y, z in self.points]
+        self._draw_view(p, QtCore.QRect(0, 0, self.width(), half), "Side view (r, z)", planar, reach, ground=True)
+        top = [(x, y) for x, y, _ in self.points]
+        self._draw_view(p, QtCore.QRect(0, half, self.width(), half), "Top view (x, y)", top, reach, ground=False)
 
-    def retranslateUi(self, MainWindow):
-        _translate = QtCore.QCoreApplication.translate
-        
-        MainWindow.setWindowTitle(_translate("MainWindow", "MainWindow"))
-        
-        self.LabelForLengthFrame.setText(_translate("MainWindow", "LENGTH OF THE MANIPULATOR COMPONENTS:"))
-        self.LabelForBaseLengthBox.setText(_translate("MainWindow", "LENGTH OF THE BASE COMPONENT (IN cm):"))
-        self.LabelForSecondLengthBox.setText(_translate("MainWindow", "LENGTH OF THE SECOND COMPONENT (IN cm):"))
-        self.LabelForThirdLengthBox.setText(_translate("MainWindow", "LENGTH OF THE THIRD COMPONENT (IN cm):"))
-        self.LabelForFinalLengthBox.setText(_translate("MainWindow", "LENGTH OF THE FINAL COMPONENT (IN cm):"))
-        
-        self.SubmitButton.setText(_translate("MainWindow", "SUBMIT"))
-        
-        self.AnglesFrameLabel.setText(_translate("MainWindow", "ANGLES OF THE RESPECTIVE SERVOS:"))
-        
-        self.LabelForPointReachedFrame.setText(_translate("MainWindow", "POINT REACHED:"))
-        
-        self.LabelForXCoordinate.setText(_translate("MainWindow", "X-COORDINATE:"))
-        
-        self.LabelForYCoordinate.setText(_translate("MainWindow", "Y-COORDINATE:"))
-        
-        self.LabelForForwardKinematicsFrame.setText(_translate("MainWindow", "FORWARD KINEMATICS"))
-        
-        self.LabelForZCoordinate.setText(_translate("MainWindow", "Z-COORDINATE:"))
-        
-        self.LabelForInverseKinematicsFrame.setText(_translate("MainWindow", "INVERSE KINEMATICS"))
-        
-        self.LabelForInverseKinematicsBox.setText(_translate("MainWindow", "CHOOSE THE POINT YOU WANT TO GO TO:"))
-        
-        self.RadioButtonForA.setText(_translate("MainWindow", "Point A"))
-        self.RadioButtonForB.setText(_translate("MainWindow", "Point B"))
-        self.RadioButtonForC.setText(_translate("MainWindow", "Point C"))
-        self.RadioButtonForD.setText(_translate("MainWindow", "Point D"))
-        self.RadioButtonForE.setText(_translate("MainWindow", "Point E"))
+    def _draw_view(self, p, rect, title, pts, reach, ground):
+        margin = 24
+        scale = (min(rect.width(), rect.height()) - 2 * margin) / (2.2 * reach)
+        cx = rect.center().x()
+        cy = rect.bottom() - margin - 0.1 * reach * scale if ground else rect.center().y()
 
-    def updateBaseAngle(self):
-        # Update the angle of the Base Servo based on the dial value
-        # Also update the calculated point reached using calculatePointReached
-        base_angle = float(self.BaseDial.value())
-        set_servo(Ui_MainWindow.BASE_SERVO_PIN, base_angle)
-        
-        second_angle = float(self.SecondDial.value())
-        third_angle = float(self.ThirdDial.value())
-        fourth_angle = float(self.FinalDial.value())
-        
-        #self.calculatePointReached()
-        
-    def updateSecondAngle(self):
-        # Update the angle of the Second Servo based on the dial value
-        # Also update the calculated point reached using calculatePointReached
-        second_angle = float(self.SecondDial.value())
-        set_servo(Ui_MainWindow.SECOND_SERVO_PIN, second_angle)
-        
-        base_angle = float(self.BaseDial.value())
-        third_angle = float(self.ThirdDial.value())
-        fourth_angle = float(self.FinalDial.value())
-        
-        #self.calculatePointReached()
+        def to_px(u, v):
+            return QtCore.QPointF(cx + u * scale, cy - v * scale)
 
-    def updateThirdAngle(self, value):
-        # Update the angle of the Third Servo based on the dial value
-        third_angle = float(self.ThirdDial.value())
-        set_servo(Ui_MainWindow.THIRD_SERVO_PIN, third_angle)
-        
-        base_angle = float(self.BaseDial.value())
-        second_angle = float(self.SecondDial.value())
-        fourth_angle = float(self.FinalDial.value())
-        
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.setPen(QtGui.QPen(QtGui.QColor("#2a2e38"), 1))
+        p.drawRect(rect.adjusted(4, 4, -4, -4))
+        p.setPen(QtGui.QColor("#8b93a7"))
+        p.drawText(rect.adjusted(12, 8, 0, 0), QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop, title)
 
-    def updateFinalAngle(self, value):
-        # Update the angle of the Final Servo based on the dial value
-        # Also update the calculated point reached using calculatePointReached
-        fourth_angle = float(self.FinalDial.value())
-        set_servo(Ui_MainWindow.FOURTH_SERVO_PIN, fourth_angle)
-        
-        base_angle = float(self.BaseDial.value())
-        second_angle = float(self.SecondDial.value())
-        third_angle = float(self.ThirdDial.value())
-        
-        #self.calculatedPointReached()
-    
-    def updateBaseAngleLabel(self, value):
-        self.LabelForBaseAngle.display(value)
+        # Reach circle / ground line
+        p.setPen(QtGui.QPen(QtGui.QColor("#2f3542"), 1, QtCore.Qt.DashLine))
+        if ground:
+            p.drawLine(QtCore.QPointF(rect.left() + 8, cy), QtCore.QPointF(rect.right() - 8, cy))
+        else:
+            r = (reach - self.links.base) * scale
+            p.drawEllipse(QtCore.QPointF(cx, cy), r, r)
 
-    def updateSecondAngleLabel(self, value):
-        self.LabelForSecondAngle.display(value)
+        colors = ["#6b7280", "#60a5fa", "#a78bfa", "#f472b6"]
+        for i in range(len(pts) - 1):
+            p.setPen(QtGui.QPen(QtGui.QColor(colors[i % len(colors)]), 6, cap=QtCore.Qt.RoundCap))
+            p.drawLine(to_px(*pts[i]), to_px(*pts[i + 1]))
+        p.setPen(QtCore.Qt.NoPen)
+        for i, pt in enumerate(pts):
+            p.setBrush(QtGui.QColor("#facc15" if i == len(pts) - 1 else "#e5e7eb"))
+            p.drawEllipse(to_px(*pt), 4.5, 4.5)
 
-    def updateThirdAngleLabel(self, value):
-        self.LabelForThirdAngle.display(value)
 
-    def updateFinalAngleLabel(self, value):
-        self.LabelForFinalAngle.display(value)
-        
-    
-    def moveServosForRadioButton(self, key):
-        if key in Ui_MainWindow.angle_dict:
-            angles = Ui_MainWindow.angle_dict[key]
-            set_servo(Ui_MainWindow.BASE_SERVO_PIN, angles[0])
-            set_servo(Ui_MainWindow.SECOND_SERVO_PIN, angles[1])
-            set_servo(Ui_MainWindow.THIRD_SERVO_PIN, angles[2])
-            set_servo(Ui_MainWindow.FOURTH_SERVO_PIN, angles[3])
+class MainWindow(QtWidgets.QMainWindow):
+    def __init__(self, simulate: bool):
+        super().__init__()
+        self.servos = ServoBank(SERVO_PINS, simulate=simulate)
+        mode = "SIMULATION" if self.servos.simulate else "Raspberry Pi"
+        self.setWindowTitle(f"4R Manipulator — {mode}")
+
+        self._pending = set()  # joints whose servo needs updating
+        self._send_timer = QtCore.QTimer(self, singleShot=True, interval=SEND_DELAY_MS)
+        self._send_timer.timeout.connect(self._send_pending)
+        self._release_timer = QtCore.QTimer(self, singleShot=True, interval=RELEASE_DELAY_MS)
+        self._release_timer.timeout.connect(self.servos.release)
+
+        self.view = ArmView()
+        controls = QtWidgets.QVBoxLayout()
+        controls.addWidget(self._build_links())
+        controls.addWidget(self._build_joints())
+        controls.addWidget(self._build_readout())
+        controls.addWidget(self._build_ik())
+        controls.addWidget(self._build_presets())
+        controls.addStretch(1)
+
+        root = QtWidgets.QHBoxLayout()
+        root.addWidget(self.view, 1)
+        root.addLayout(controls, 1)
+        central = QtWidgets.QWidget()
+        central.setLayout(root)
+        self.setCentralWidget(central)
+        self.statusBar().showMessage(
+            "Servos live" if not self.servos.simulate else "Simulation mode — servo commands are printed to the console"
+        )
+        self.refresh()
+
+    # ---------- UI builders ----------
+    def _build_links(self):
+        box = QtWidgets.QGroupBox("Link lengths (cm)")
+        form = QtWidgets.QFormLayout(box)
+        self.link_spins = []
+        for label, value in zip(("Base column L1", "Upper arm L2", "Forearm L3", "Tool L4"), DEFAULT_LINKS_CM):
+            spin = QtWidgets.QDoubleSpinBox(decimals=1, minimum=0.0, maximum=200.0, singleStep=0.5, value=value)
+            spin.valueChanged.connect(self.refresh)
+            form.addRow(label, spin)
+            self.link_spins.append(spin)
+        return box
+
+    def _build_joints(self):
+        box = QtWidgets.QGroupBox("Forward kinematics — servo angles (°)")
+        grid = QtWidgets.QGridLayout(box)
+        self.dials, self.dial_labels = [], []
+        for i, name in enumerate(JOINT_NAMES):
+            dial = QtWidgets.QDial(minimum=0, maximum=180, value=90, notchesVisible=True)
+            dial.setWrapping(False)  # wrapping let the dial jump 180° -> 0°
+            dial.setFixedSize(90, 90)
+            dial.valueChanged.connect(lambda _v, j=i: self._on_dial(j))
+            label = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
+            grid.addWidget(QtWidgets.QLabel(name, alignment=QtCore.Qt.AlignCenter), 0, i)
+            grid.addWidget(dial, 1, i, alignment=QtCore.Qt.AlignCenter)
+            grid.addWidget(label, 2, i)
+            self.dials.append(dial)
+            self.dial_labels.append(label)
+        return box
+
+    def _build_readout(self):
+        box = QtWidgets.QGroupBox("End effector")
+        row = QtWidgets.QHBoxLayout(box)
+        self.readout = {}
+        for key in ("X", "Y", "Z", "Pitch"):
+            lcd = QtWidgets.QLCDNumber(digitCount=7)
+            lcd.setSegmentStyle(QtWidgets.QLCDNumber.Flat)
+            lcd.setMinimumHeight(34)
+            unit = "°" if key == "Pitch" else "cm"
+            row.addWidget(QtWidgets.QLabel(f"{key} ({unit})"))
+            row.addWidget(lcd)
+            self.readout[key] = lcd
+        return box
+
+    def _build_ik(self):
+        box = QtWidgets.QGroupBox("Inverse kinematics — go to a point")
+        grid = QtWidgets.QGridLayout(box)
+        self.ik_spins = {}
+        for col, (key, lo, hi, val) in enumerate(
+            (("X", -200, 200, 12.0), ("Y", -200, 200, 8.0), ("Z", -200, 200, 16.0), ("Pitch", -180, 180, -15.0))
+        ):
+            spin = QtWidgets.QDoubleSpinBox(decimals=1, minimum=lo, maximum=hi, singleStep=0.5, value=val)
+            grid.addWidget(QtWidgets.QLabel(key), 0, col)
+            grid.addWidget(spin, 1, col)
+            self.ik_spins[key] = spin
+        go = QtWidgets.QPushButton("Go")
+        go.clicked.connect(self._on_ik)
+        here = QtWidgets.QPushButton("Use current")
+        here.setToolTip("Copy the current tip position into the target fields")
+        here.clicked.connect(self._copy_current_pose)
+        grid.addWidget(go, 1, 4)
+        grid.addWidget(here, 0, 4)
+        self.ik_status = QtWidgets.QLabel()
+        grid.addWidget(self.ik_status, 2, 0, 1, 5)
+        return box
+
+    def _build_presets(self):
+        box = QtWidgets.QGroupBox("Taught points")
+        row = QtWidgets.QHBoxLayout(box)
+        for key, angles in PRESETS.items():
+            btn = QtWidgets.QPushButton(f"Point {key}")
+            btn.setToolTip(" / ".join(f"{n} {a}°" for n, a in zip(JOINT_NAMES, angles)))
+            btn.clicked.connect(lambda _c, a=angles: self.set_servo_angles(a))
+            row.addWidget(btn)
+        return box
+
+    # ---------- behaviour ----------
+    def links(self) -> kin.Links:
+        return kin.Links(*(s.value() for s in self.link_spins))
+
+    def servo_angles(self):
+        return tuple(float(d.value()) for d in self.dials)
+
+    def set_servo_angles(self, angles):
+        """Move all dials at once (one servo update, not four)."""
+        for i, (dial, angle) in enumerate(zip(self.dials, angles)):
+            dial.blockSignals(True)
+            dial.setValue(int(round(angle)))
+            dial.blockSignals(False)
+            self._pending.add(i)
+        self._send_timer.start()
+        self.refresh()
+
+    def _on_dial(self, joint: int):
+        self._pending.add(joint)
+        self._send_timer.start()  # restarts while the dial is still moving
+        self.refresh()
+
+    def _send_pending(self):
+        for j in sorted(self._pending):
+            self.servos.move(SERVO_PINS[j], self.dials[j].value())
+        self._pending.clear()
+        self._release_timer.start()
+
+    def refresh(self):
+        servo = self.servo_angles()
+        for label, angle in zip(self.dial_labels, servo):
+            label.setText(f"{angle:.0f}°")
+        links = self.links()
+        pose = kin.forward(servo, links)
+        for key, value in (("X", pose.x), ("Y", pose.y), ("Z", pose.z), ("Pitch", pose.pitch)):
+            self.readout[key].display(f"{value:.1f}")
+        self.view.update_arm(kin.servo_to_joint(servo), links)
+
+    def _copy_current_pose(self):
+        pose = kin.forward(self.servo_angles(), self.links())
+        for key, value in (("X", pose.x), ("Y", pose.y), ("Z", pose.z), ("Pitch", pose.pitch)):
+            self.ik_spins[key].setValue(value)
+
+    def _on_ik(self):
+        target = kin.Pose(*(self.ik_spins[k].value() for k in ("X", "Y", "Z", "Pitch")))
+        solution = kin.inverse(target, self.links())
+        if solution is None:
+            self.ik_status.setText("⚠ Out of reach, or needs a servo outside 0–180°. Try another pitch.")
+            self.ik_status.setStyleSheet("color: #dc2626")
+            return
+        self.ik_status.setText("Servos: " + ", ".join(f"{n} {a:.0f}°" for n, a in zip(JOINT_NAMES, solution)))
+        self.ik_status.setStyleSheet("")
+        self.set_servo_angles(solution)
+
+    def closeEvent(self, event):
+        self.servos.close()
+        super().closeEvent(event)
+
+
+def main():
+    simulate = "--simulate" in sys.argv or not ON_PI
+    app = QtWidgets.QApplication(sys.argv)
+    window = MainWindow(simulate=simulate)
+    window.resize(1100, 760)
+    window.show()
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
-	import sys
-	app = QtWidgets.QApplication(sys.argv)
-	setup_gpio() #Calling GPIO setup function before creating the UI
-	MainWindow = QtWidgets.QMainWindow()
-	ui = Ui_MainWindow()
-	ui.setupUi(MainWindow)
-	MainWindow.show()
-	sys.exit(app.exec_())
+    main()
