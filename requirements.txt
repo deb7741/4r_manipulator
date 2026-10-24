@@ -1,0 +1,8 @@
+PyQt5>=5.15
+# Raspberry Pi only — pigpio gives jitter-free servo pulses (recommended):
+#   sudo apt install pigpio python3-pigpio && sudo systemctl enable --now pigpiod
+pigpio>=1.78; platform_machine == "armv7l" or platform_machine == "aarch64"
+# Fallback backend (usually preinstalled on Raspberry Pi OS):
+RPi.GPIO>=0.7; platform_machine == "armv7l" or platform_machine == "aarch64"
+# Tests
+pytest>=7

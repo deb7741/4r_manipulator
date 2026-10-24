@@ -1,0 +1,13 @@
+{
+  "pins_bcm": [17, 18, 22, 27],
+  "pulse_us": [[400, 2400], [400, 2400], [400, 2400], [400, 2400]],
+  "offsets_deg": [0, 0, 90, 90],
+  "directions": [1, 1, 1, 1],
+  "min_deg": [0, 0, 0, 0],
+  "max_deg": [180, 180, 180, 180],
+  "links_cm": {"base": 8.0, "upper": 10.0, "fore": 8.0, "tool": 4.0},
+  "home_deg": [90, 90, 90, 90],
+  "max_speed_deg_s": 90,
+  "release_after_move": "auto",
+  "backend": "auto"
+}
